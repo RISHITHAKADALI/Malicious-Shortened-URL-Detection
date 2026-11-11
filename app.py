@@ -1,35 +1,55 @@
 
-import logging
-import ipaddress
 import re
+import ipaddress
+import html
+from pathlib import Path
 from urllib.parse import urlparse
 
-import joblib
+import streamlit as st
 import pandas as pd
+import joblib
 import tldextract
 
-from flask import Flask, render_template, request
 
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+# ==================================================
+# PAGE CONFIGURATION
+# ==================================================
 
-# --------------------------------------------------
+st.set_page_config(
+    page_title="URL Shield | Intelligent URL Security",
+    page_icon="🛡️",
+    layout="centered"
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+
+
+# ==================================================
 # LOAD TRAINED MODEL
-# --------------------------------------------------
+# ==================================================
 
-MODEL_PATH = "model_rf.pkl"
-FEATURE_COLUMNS_PATH = "feature_columns.pkl"
-MEDIANS_PATH = "medians.pkl"
-TOP_TLDS_PATH = "top_tlds.pkl"
+@st.cache_resource
+def load_model_files():
+    model = joblib.load(BASE_DIR / "model_rf.pkl")
+    feature_columns = joblib.load(BASE_DIR / "feature_columns.pkl")
+    medians = joblib.load(BASE_DIR / "medians.pkl")
+    top_tlds = joblib.load(BASE_DIR / "top_tlds.pkl")
 
-model = joblib.load(MODEL_PATH)
-feature_columns = joblib.load(FEATURE_COLUMNS_PATH)
-medians = joblib.load(MEDIANS_PATH)
-top_tlds = joblib.load(TOP_TLDS_PATH)
+    return model, feature_columns, medians, top_tlds
 
-# --------------------------------------------------
-# TRUSTED DOMAIN OVERRIDE
-# --------------------------------------------------
+
+try:
+    model, feature_columns, medians, top_tlds = load_model_files()
+    model_loaded = True
+except Exception as error:
+    model_loaded = False
+    model_error = str(error)
+
+
+# ==================================================
+# CONSTANTS
+# These match your original training script
+# ==================================================
 
 TRUSTED_DOMAINS = {
     "google.com",
@@ -44,49 +64,24 @@ TRUSTED_DOMAINS = {
     "instagram.com",
 }
 
-# --------------------------------------------------
-# SUSPICIOUS KEYWORDS
-# --------------------------------------------------
-
 SUSPICIOUS_WORDS = [
-    "login",
-    "verify",
-    "account",
-    "secure",
-    "update",
-    "password",
-    "banking",
-    "confirm",
-    "signin",
-    "wallet",
-    "payment",
-    "free",
-    "bonus",
-    "suspend",
+    "login", "verify", "account", "update", "secure",
+    "banking", "confirm", "signin", "webscr",
+    "password", "free", "gift", "prize", "win",
+    "lottery", "claim", "urgent", "suspend"
 ]
 
 SHORTENED_DOMAINS = {
-    "bit.ly",
-    "tinyurl.com",
-    "t.co",
-    "goo.gl",
-    "ow.ly",
-    "is.gd",
-    "buff.ly",
-    "rebrand.ly",
-    "cutt.ly",
-    "shorte.st",
-    "tiny.cc",
-    "bl.ink",
-    "soo.gd",
-    "s2r.co",
-    "clck.ru",
-    "v.gd",
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl",
+    "ow.ly", "is.gd", "buff.ly", "rebrand.ly",
+    "cutt.ly", "shorte.st", "tiny.cc", "bl.ink",
+    "soo.gd", "s2r.co", "clck.ru", "v.gd"
 }
 
-# --------------------------------------------------
+
+# ==================================================
 # URL VALIDATION
-# --------------------------------------------------
+# ==================================================
 
 def normalize_url(url):
     url = url.strip()
@@ -99,8 +94,16 @@ def normalize_url(url):
 
     parsed = urlparse(url)
 
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError("Only HTTP and HTTPS URLs are supported.")
+
     if not parsed.hostname:
         raise ValueError("Please enter a valid URL.")
+
+    try:
+        parsed.port
+    except ValueError:
+        raise ValueError("Invalid port number in URL.")
 
     return url
 
@@ -111,102 +114,104 @@ def get_domain(url):
 
 
 def is_trusted_domain(domain):
-    if not domain:
-        return False
-
     return any(
         domain == trusted or domain.endswith("." + trusted)
         for trusted in TRUSTED_DOMAINS
     )
 
-# --------------------------------------------------
+
+# ==================================================
 # FEATURE EXTRACTION
-# --------------------------------------------------
+# Matches extract_features.py used during training
+# ==================================================
 
-def extract_features(url):
+def extract_url_features(url):
     parsed = urlparse(url)
-    domain = parsed.hostname or ""
-    domain = domain.lower()
 
-    extracted = tldextract.extract(domain)
+    domain_full = parsed.netloc.lower()
 
-    tld = extracted.suffix.lower() if extracted.suffix else "unknown"
+    extracted = tldextract.extract(url)
 
-    try:
-        ipaddress.ip_address(domain)
-        has_ip = 1
-    except ValueError:
-        has_ip = 0
+    registered_domain = (
+        f"{extracted.domain}.{extracted.suffix}"
+        if extracted.suffix
+        else extracted.domain
+    )
 
     suspicious_count = sum(
         1 for word in SUSPICIOUS_WORDS
         if word in url.lower()
     )
 
-    is_shortened = int(domain in SHORTENED_DOMAINS)
-
-    path_parts = [
-        part for part in parsed.path.split("/")
-        if part
-    ]
-
-    query_params = (
-        len(parsed.query.split("&"))
-        if parsed.query else 0
+    is_shortened = int(
+        registered_domain in SHORTENED_DOMAINS
     )
 
-    shortened_code_length = (
-        len(path_parts[0])
-        if is_shortened and path_parts
-        else 0
-    )
+    try:
+        ipaddress.ip_address(parsed.hostname)
+        has_ip = 1
+    except (ValueError, TypeError):
+        has_ip = 0
 
     features = {
         "url_length": len(url),
         "num_dots": url.count("."),
         "num_hyphens": url.count("-"),
         "num_digits": sum(c.isdigit() for c in url),
-        "num_special_chars": sum(
-            not c.isalnum() for c in url
+        "num_special_chars": len(
+            re.findall(r"[^a-zA-Z0-9]", url)
         ),
-        "num_subdirs": len(path_parts),
-        "num_query_params": query_params,
+        "num_subdirs": parsed.path.count("/"),
+        "num_query_params": (
+            len(parsed.query.split("&"))
+            if parsed.query else 0
+        ),
         "has_at_symbol": int("@" in url),
         "has_ip_address": has_ip,
         "num_suspicious_words": suspicious_count,
-        "domain_length": len(domain),
-        "tld": tld,
+        "domain_length": len(domain_full),
+        "tld": extracted.suffix,
         "uses_https": int(parsed.scheme.lower() == "https"),
         "domain_age_days": -1,
         "domain_reputation_score": -1,
         "is_shortened": is_shortened,
-        "shortened_code_length": shortened_code_length,
+        "shortened_code_length": (
+            len(parsed.path.strip("/"))
+            if is_shortened else 0
+        )
     }
 
     return features
 
-# --------------------------------------------------
+
+# ==================================================
 # PREPARE MODEL INPUT
-# --------------------------------------------------
+# ==================================================
 
 def prepare_model_input(features):
     df = pd.DataFrame([features])
 
-    # Handle TLD values
-    df["tld"] = df["tld"].apply(
-        lambda value: value if value in top_tlds else "other"
+    df["tld"] = df["tld"].where(
+        df["tld"].isin(top_tlds),
+        "other"
     )
 
-    # One-hot encoding
-    df = pd.get_dummies(df, columns=["tld"])
+    df = pd.get_dummies(
+        df,
+        columns=["tld"],
+        prefix="tld"
+    )
 
-    # Fill unknown domain information
-    for column in ["domain_age_days", "domain_reputation_score"]:
+    for column in [
+        "domain_age_days",
+        "domain_reputation_score"
+    ]:
         if column in df.columns:
             median_value = medians.get(column, 0)
-            df[column] = df[column].replace(-1, median_value)
+            df[column] = df[column].replace(
+                -1, median_value
+            )
 
-    # Match the exact training feature order
     df = df.reindex(
         columns=feature_columns,
         fill_value=0
@@ -214,9 +219,10 @@ def prepare_model_input(features):
 
     return df
 
-# --------------------------------------------------
+
+# ==================================================
 # EXPLANATIONS
-# --------------------------------------------------
+# ==================================================
 
 def generate_explanations(features):
     signals = []
@@ -262,122 +268,411 @@ def generate_explanations(features):
 
     return signals, info
 
-# --------------------------------------------------
+
+# ==================================================
 # PREDICTION
-# --------------------------------------------------
+# ==================================================
 
 def predict_url(url):
+
     domain = get_domain(url)
 
-    # Trusted-domain override
     if is_trusted_domain(domain):
         return {
             "prediction": "benign",
-            "result": "SAFE - Trusted Domain",
+            "result": "TRUSTED DOMAIN - ALLOWLIST MATCH",
             "confidence": 0.0,
             "signals": [],
             "info": [
                 "This domain belongs to the configured trusted-domain list.",
                 "The trusted-domain rule bypassed the machine-learning prediction.",
-            ],
+                "This is not a guarantee that every URL on the domain is safe."
+            ]
         }
 
-    features = extract_features(url)
+    features = extract_url_features(url)
+
     model_input = prepare_model_input(features)
 
     prediction = model.predict(model_input)[0]
 
     probabilities = model.predict_proba(model_input)[0]
+
     classes = list(model.classes_)
 
-    malicious_index = None
-
-    for index, label in enumerate(classes):
-        if str(label).lower() == "malicious":
-            malicious_index = index
-            break
-
-    if malicious_index is None:
-        for index, label in enumerate(classes):
-            if str(label).lower() in ["1", "malicious"]:
-                malicious_index = index
-                break
+    malicious_index = next(
+        (
+            i for i, label in enumerate(classes)
+            if str(label).lower() in ("1", "malicious")
+        ),
+        None
+    )
 
     if malicious_index is None:
-        malicious_index = len(classes) - 1
+        raise ValueError(
+            "Could not identify the malicious class in the trained model."
+        )
 
     malicious_score = float(
         probabilities[malicious_index] * 100
     )
 
     is_malicious = (
-        str(prediction).lower() == "malicious"
-        or prediction == 1
+        str(prediction).lower() in ("1", "malicious")
     )
 
     signals, info = generate_explanations(features)
 
-    if is_malicious:
-        result = "MALICIOUS / SUSPICIOUS URL"
-    else:
-        result = "SAFE URL"
-
     return {
         "prediction": "malicious" if is_malicious else "benign",
-        "result": result,
+        "result": (
+            "MALICIOUS / SUSPICIOUS URL"
+            if is_malicious else "MODEL CLASSIFIED URL AS BENIGN"
+        ),
         "confidence": round(malicious_score, 2),
         "signals": signals,
-        "info": info,
+        "info": info
     }
 
-# --------------------------------------------------
-# FLASK ROUTE
-# --------------------------------------------------
 
-@app.route("/", methods=["GET", "POST"])
-def index():
-    result = None
-    prediction = None
-    confidence = 0
-    signals = []
-    info = []
-    url = ""
+# ==================================================
+# CUSTOM CSS - URL SHIELD DESIGN
+# ==================================================
 
-    if request.method == "POST":
-        submitted_url = request.form.get("url", "").strip()
-        url = submitted_url
+st.markdown("""
+<style>
 
-        try:
-            normalized_url = normalize_url(submitted_url)
-            url = normalized_url
+.stApp {
+    background:
+        radial-gradient(
+            ellipse at 50% -20%,
+            rgba(49, 100, 220, 0.18),
+            transparent 55%
+        ),
+        #080c17;
+    color: #edf3ff;
+}
 
-            output = predict_url(normalized_url)
+.block-container {
+    max-width: 950px;
+    padding-top: 2rem;
+}
 
-            result = output["result"]
-            prediction = output["prediction"]
-            confidence = output["confidence"]
-            signals = output["signals"]
-            info = output["info"]
+h1, h2, h3, p, label {
+    color: #edf3ff;
+}
 
-        except Exception as error:
-            logging.exception("URL scanning error")
+.brand {
+    font-size: 25px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    color: #edf3ff;
+}
 
-            result = "Unable to analyze URL"
-            prediction = "error"
-            confidence = 0
-            signals = []
-            info = [str(error)]
+.brand span {
+    color: #80b5ff;
+}
 
-    return render_template(
-        "index.html",
-        result=result,
-        prediction=prediction,
-        confidence=confidence,
-        signals=signals,
-        info=info,
-        url=url,
+.status {
+    color: #20c997;
+    text-align: right;
+    font-size: 13px;
+    padding-top: 10px;
+}
+
+.hero {
+    text-align: center;
+    padding: 45px 0 35px 0;
+}
+
+.hero-badge {
+    display: inline-block;
+    color: #90baff;
+    background: rgba(59,130,246,0.09);
+    border: 1px solid #28446e;
+    padding: 8px 15px;
+    border-radius: 30px;
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+.hero-title {
+    font-size: clamp(32px, 5vw, 50px);
+    font-weight: 800;
+    line-height: 1.2;
+    margin-top: 22px;
+}
+
+.hero-title span {
+    color: #80aaff;
+}
+
+.hero-description {
+    color: #8493ab;
+    font-size: 15px;
+    line-height: 1.8;
+    max-width: 650px;
+    margin: 15px auto;
+}
+
+.scanner-card {
+    background: linear-gradient(180deg, #111b2d, #0d1524);
+    border: 1px solid #233149;
+    border-radius: 18px;
+    padding: 25px;
+    margin-top: 15px;
+}
+
+.stTextInput input {
+    background: #080e1a !important;
+    color: white !important;
+    border: 1px solid #2a3951 !important;
+    border-radius: 10px !important;
+}
+
+.stButton button,
+.stFormSubmitButton button {
+    background: linear-gradient(135deg, #3478f6, #5b65ed);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-weight: 700;
+    width: 100%;
+    min-height: 45px;
+}
+
+.result-card {
+    background: #0a1220;
+    border: 1px solid #233149;
+    border-radius: 15px;
+    padding: 25px;
+    margin-top: 25px;
+}
+
+.safe {
+    border-color: rgba(32,201,151,0.5);
+}
+
+.danger {
+    border-color: rgba(255,100,124,0.5);
+}
+
+.result-title {
+    font-size: 21px;
+    font-weight: 800;
+}
+
+.safe-text {
+    color: #20c997;
+}
+
+.danger-text {
+    color: #ff647c;
+}
+
+.muted {
+    color: #8493ab;
+    font-size: 13px;
+}
+
+.footer {
+    text-align: center;
+    color: #8493ab;
+    font-size: 12px;
+    margin-top: 50px;
+    padding: 25px 0;
+    border-top: 1px solid #233149;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# ==================================================
+# HEADER
+# ==================================================
+
+header_left, header_right = st.columns([3, 1])
+
+with header_left:
+    st.markdown(
+        '<div class="brand">🛡 URL <span>SHIELD</span></div>',
+        unsafe_allow_html=True
+    )
+
+with header_right:
+    st.markdown(
+        '<div class="status">● ML SCANNER</div>',
+        unsafe_allow_html=True
     )
 
 
-if __name__ == "__main__":
-    app.run(debug=True)
+# ==================================================
+# HERO SECTION
+# ==================================================
+
+st.markdown("""
+<div class="hero">
+
+    <div class="hero-badge">
+        ✦ INTELLIGENT URL SECURITY
+    </div>
+
+    <div class="hero-title">
+        Secure Every Click.<br>
+        <span>Detect Digital Threats.</span>
+    </div>
+
+    <div class="hero-description">
+        Analyze URLs with machine learning to identify
+        potentially malicious links, suspicious patterns,
+        and security risks before interacting with them.
+    </div>
+
+</div>
+""", unsafe_allow_html=True)
+
+
+# ==================================================
+# CHECK MODEL
+# ==================================================
+
+if not model_loaded:
+    st.error("Unable to load the trained ML model.")
+    st.code(model_error)
+    st.stop()
+
+
+# ==================================================
+# URL SCANNER
+# ==================================================
+
+st.markdown("""
+<div class="scanner-card">
+    <h3>⌕ URL Analysis</h3>
+    <p class="muted">
+        Enter a URL to perform a security scan.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+with st.form("url_scanner"):
+
+    submitted_url = st.text_input(
+        "Enter website URL",
+        placeholder="https://example.com"
+    )
+
+    scan_button = st.form_submit_button(
+        "Analyze URL →",
+        use_container_width=True
+    )
+
+
+# ==================================================
+# DISPLAY RESULTS
+# ==================================================
+
+if scan_button:
+
+    try:
+        normalized_url = normalize_url(submitted_url)
+
+        with st.spinner("Analyzing URL with machine learning..."):
+            output = predict_url(normalized_url)
+
+        prediction = output["prediction"]
+        confidence = output["confidence"]
+
+        safe = prediction == "benign"
+
+        result_class = "safe" if safe else "danger"
+        result_color = "safe-text" if safe else "danger-text"
+
+        result_url = html.escape(normalized_url)
+
+        st.markdown(
+            f"""
+            <div class="result-card {result_class}">
+
+                <div class="result-title {result_color}">
+                    {"✓" if safe else "⚠"}
+                    {html.escape(output["result"])}
+                </div>
+
+                <p class="muted">
+                    {"The model classified this URL as benign."
+                    if safe else
+                    "The model classified this URL as malicious."}
+                </p>
+
+                <br>
+
+                <p class="muted">ANALYZED URL</p>
+
+                <p style="overflow-wrap:anywhere;color:#b5c4da;">
+                    {result_url}
+                </p>
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.markdown("### Malicious prediction score")
+
+        st.progress(
+            min(max(confidence, 0.0), 100.0) / 100.0
+        )
+
+        st.markdown(
+            f"**{confidence:.2f}%**"
+        )
+
+        left, right = st.columns(2)
+
+        with left:
+            st.markdown("### ⚠ Detection Signals")
+
+            if output["signals"]:
+                for signal in output["signals"]:
+                    st.warning(signal)
+            else:
+                st.success(
+                    "No obvious suspicious URL patterns were detected."
+                )
+
+        with right:
+            st.markdown("### ⓘ Additional Information")
+
+            for item in output["info"]:
+                st.info(item)
+
+        st.caption(
+            "Note: A benign classification does not guarantee "
+            "that a website is safe. Do not open suspicious links."
+        )
+
+    except Exception as error:
+        st.error("Unable to analyze URL.")
+        st.exception(error)
+
+
+# ==================================================
+# FOOTER
+# ==================================================
+
+st.markdown("""
+<div class="footer">
+
+    <strong>URL SHIELD</strong><br>
+
+    Intelligent Detection of Malicious Shortened URLs<br>
+
+    Machine Learning Security Research Project<br><br>
+
+    Predictions are not a guarantee of website safety.
+    Always verify suspicious links before opening them.
+
+</div>
+""", unsafe_allow_html=True)
