@@ -1,4 +1,3 @@
-
 import re
 import ipaddress
 import html
@@ -22,6 +21,20 @@ st.set_page_config(
 )
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+# ==================================================
+# HTML HELPER
+# Streamlit's markdown treats indented lines and blank lines
+# inside HTML as code. This removes indentation and blank lines
+# so the HTML is drawn instead of printed as text.
+# ==================================================
+
+def render_html(html_text):
+    cleaned = "\n".join(
+        line.strip() for line in html_text.splitlines() if line.strip()
+    )
+    st.markdown(cleaned, unsafe_allow_html=True)
 
 
 # ==================================================
@@ -495,42 +508,30 @@ h1, h2, h3, p, label {
 header_left, header_right = st.columns([3, 1])
 
 with header_left:
-    st.markdown(
-        '<div class="brand">🛡 URL <span>SHIELD</span></div>',
-        unsafe_allow_html=True
-    )
+    render_html('<div class="brand">🛡 URL <span>SHIELD</span></div>')
 
 with header_right:
-    st.markdown(
-        '<div class="status">● ML SCANNER</div>',
-        unsafe_allow_html=True
-    )
+    render_html('<div class="status">● ML SCANNER</div>')
 
 
 # ==================================================
 # HERO SECTION
 # ==================================================
 
-st.markdown("""
+render_html("""
 <div class="hero">
-
-    <div class="hero-badge">
-        ✦ INTELLIGENT URL SECURITY
-    </div>
-
-    <div class="hero-title">
-        Secure Every Click.<br>
-        <span>Detect Digital Threats.</span>
-    </div>
-
-    <div class="hero-description">
-        Analyze URLs with machine learning to identify
-        potentially malicious links, suspicious patterns,
-        and security risks before interacting with them.
-    </div>
-
+<div class="hero-badge">✦ INTELLIGENT URL SECURITY</div>
+<div class="hero-title">
+Secure Every Click.<br>
+<span>Detect Digital Threats.</span>
 </div>
-""", unsafe_allow_html=True)
+<div class="hero-description">
+Analyze URLs with machine learning to identify
+potentially malicious links, suspicious patterns,
+and security risks before interacting with them.
+</div>
+</div>
+""")
 
 
 # ==================================================
@@ -547,14 +548,12 @@ if not model_loaded:
 # URL SCANNER
 # ==================================================
 
-st.markdown("""
+render_html("""
 <div class="scanner-card">
-    <h3>⌕ URL Analysis</h3>
-    <p class="muted">
-        Enter a URL to perform a security scan.
-    </p>
+<h3>⌕ URL Analysis</h3>
+<p class="muted">Enter a URL to perform a security scan.</p>
 </div>
-""", unsafe_allow_html=True)
+""")
 
 with st.form("url_scanner"):
 
@@ -588,36 +587,24 @@ if scan_button:
 
         result_class = "safe" if safe else "danger"
         result_color = "safe-text" if safe else "danger-text"
+        result_icon = "✓" if safe else "⚠"
+        result_message = (
+            "The model classified this URL as benign."
+            if safe else
+            "The model classified this URL as malicious."
+        )
 
         result_url = html.escape(normalized_url)
+        result_title = html.escape(output["result"])
 
-        st.markdown(
-            f"""
-            <div class="result-card {result_class}">
-
-                <div class="result-title {result_color}">
-                    {"✓" if safe else "⚠"}
-                    {html.escape(output["result"])}
-                </div>
-
-                <p class="muted">
-                    {"The model classified this URL as benign."
-                    if safe else
-                    "The model classified this URL as malicious."}
-                </p>
-
-                <br>
-
-                <p class="muted">ANALYZED URL</p>
-
-                <p style="overflow-wrap:anywhere;color:#b5c4da;">
-                    {result_url}
-                </p>
-
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        render_html(f"""
+<div class="result-card {result_class}">
+<div class="result-title {result_color}">{result_icon} {result_title}</div>
+<p class="muted">{result_message}</p>
+<p class="muted">ANALYZED URL</p>
+<p style="overflow-wrap:anywhere;color:#b5c4da;">{result_url}</p>
+</div>
+""")
 
         st.markdown("### Malicious prediction score")
 
@@ -662,17 +649,12 @@ if scan_button:
 # FOOTER
 # ==================================================
 
-st.markdown("""
+render_html("""
 <div class="footer">
-
-    <strong>URL SHIELD</strong><br>
-
-    Intelligent Detection of Malicious Shortened URLs<br>
-
-    Machine Learning Security Research Project<br><br>
-
-    Predictions are not a guarantee of website safety.
-    Always verify suspicious links before opening them.
-
+<strong>URL SHIELD</strong><br>
+Intelligent Detection of Malicious Shortened URLs<br>
+Machine Learning Security Research Project<br><br>
+Predictions are not a guarantee of website safety.
+Always verify suspicious links before opening them.
 </div>
-""", unsafe_allow_html=True)
+""")
