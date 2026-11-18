@@ -1,9 +1,6 @@
-
-Flask
-gunicorn
 streamlit
 pandas
 numpy
-scikit-learn
 joblib
 tldextract
+scikit-learn
